@@ -6,6 +6,8 @@ from typing import Optional
 from typing import Tuple
 from typing import Type
 
+import os
+
 from django.conf import settings as django_settings
 from django.contrib.staticfiles.management.commands import collectstatic
 from django.core.exceptions import ImproperlyConfigured
@@ -17,9 +19,13 @@ from collectfast import settings
 from collectfast.strategies import DisabledStrategy
 from collectfast.strategies import Strategy
 from collectfast.strategies import load_strategy
+from django.contrib.staticfiles.utils import matches_patterns
+from django.core.cache import caches
+cache = caches[settings.cache]
 
 Task = Tuple[str, str, Storage]
 
+CACHE_KEY_FOR_STATICFILES_JSON = settings.cache_key_prefix + "staticfiles.json"
 
 class Command(collectstatic.Command):
     def __init__(self, *args: Any, **kwargs: Any) -> None:
@@ -29,6 +35,7 @@ class Command(collectstatic.Command):
         self.collectfast_enabled = settings.enabled
         self.strategy: Strategy = DisabledStrategy(Storage())
         self.found_files: Dict[str, Tuple[Storage, str]] = {}
+        self.changed_files: Dict[str, Tuple[Storage, str]] = {}
 
     @staticmethod
     def _load_strategy() -> Type[Strategy[Storage]]:
@@ -106,10 +113,11 @@ class Command(collectstatic.Command):
             self.strategy.pre_should_copy_hook()
 
             if not self.strategy.should_copy_file(path, prefixed_path, source_storage):
-                self.log(f"Skipping '{path}'")
+                self.log(f"[Collectfast] Skipping (already uploaded) '{path}'")
                 self.strategy.on_skip_hook(path, prefixed_path, source_storage)
                 return
 
+        self.changed_files[prefixed_path] = (source_storage, path)
         self.num_copied_files += 1
 
         existed = prefixed_path in self.copied_files
@@ -151,15 +159,57 @@ class Command(collectstatic.Command):
 
         return True
 
+    def save_manifest_to_cache(self) -> None:
+        with open(os.path.join(django_settings.PROJECT_ROOT, "staticfiles.json"), "r") as file:
+            contents = file.read()
+            cache.set(CACHE_KEY_FOR_STATICFILES_JSON, contents)
+            self.log("[Collectfast] Persisted staticfiles.json to cache")
+
+    def restore_manifest_from_cache(self):
+        if cache.get(CACHE_KEY_FOR_STATICFILES_JSON):
+            with open(os.path.join(django_settings.PROJECT_ROOT, "staticfiles.json"), "w") as file:
+                contents = cache.get(CACHE_KEY_FOR_STATICFILES_JSON)
+                if contents: # We don't want to write an empty string to the file
+                    file.write(contents)
+                    self.log("[Collectfast] Restoring staticfiles.json from cache")
+                    return True
+        self.log("[Collectfast] Could not restore staticfiles.json from cache")
+        return False
+
     def maybe_post_process(self, super_post_process: bool) -> None:
         # This method is extracted and modified from the collect() method of the
         # builtin collectstatic command.
         # https://github.com/django/django/blob/5320ba98f3d253afcaa76b4b388a8982f87d4f1a/django/contrib/staticfiles/management/commands/collectstatic.py#L124
-
         if not super_post_process or not hasattr(self.storage, "post_process"):
             return
 
+        if len(self.changed_files) == 0:
+            self.log("[Collectfast] No files were modified, skipping post-processing.")
+            # If we cannot restore from the cache, then we need to
+            # cannot return early because we need to do the post-processing bit.
+            if self.restore_manifest_from_cache():
+                return
+
+        # self.log("[Collectfast] Calculating minimum amount of files to post-process...")
+        # files_to_post_process = self.changed_files
+
+        # for _, (storage, path) in self.found_files.items():
+        #     for extension, patterns in self.storage._patterns.items():
+        #         # if path.endswith(".map"): # We do not want to post-process map files
+        #         #     continue
+        #         if matches_patterns(path, (extension,)):
+        #             # use the original, local file, not the copied-but-unprocessed
+        #             # file, which might be somewhere far away, like S3
+        #             with storage.open(path) as original_file:
+        #                 for pattern, _template in patterns:
+        #                     content = original_file.read().decode("utf-8")
+        #                     match = pattern.search(content)
+        #                     if match:
+        #                         files_to_post_process[path] = self.found_files[path]
+
+        # self.log(f"Post-processing {len(files_to_post_process)} files")
         processor = self.storage.post_process(self.found_files, dry_run=self.dry_run)
+        self.save_manifest_to_cache()
 
         for original_path, processed_path, processed in processor:
             if isinstance(processed, Exception):
