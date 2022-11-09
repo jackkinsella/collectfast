@@ -160,14 +160,17 @@ class Command(collectstatic.Command):
         return True
 
     def save_manifest_to_cache(self) -> None:
-        with open(os.path.join(django_settings.PROJECT_ROOT, "staticfiles.json"), "r") as file:
-            contents = file.read()
-            cache.set(CACHE_KEY_FOR_STATICFILES_JSON, contents)
-            self.log("[Collectfast] Persisted staticfiles.json to cache")
+        try:
+            with open(os.path.join(settings.manifest_location, "staticfiles.json"), "r") as file:
+                contents = file.read()
+                cache.set(CACHE_KEY_FOR_STATICFILES_JSON, contents)
+                self.log("[Collectfast] Persisted staticfiles.json to cache")
+        except FileNotFoundError:
+            self.log("[Collectfast] ERROR Could not find staticfiles.json. This will near negate speed improvements")
 
     def restore_manifest_from_cache(self):
         if cache.get(CACHE_KEY_FOR_STATICFILES_JSON):
-            with open(os.path.join(django_settings.PROJECT_ROOT, "staticfiles.json"), "w") as file:
+            with open(os.path.join(settings.manifest_location, "staticfiles.json"), "w") as file:
                 contents = cache.get(CACHE_KEY_FOR_STATICFILES_JSON)
                 if contents: # We don't want to write an empty string to the file
                     file.write(contents)
@@ -209,7 +212,6 @@ class Command(collectstatic.Command):
 
         # self.log(f"Post-processing {len(files_to_post_process)} files")
         processor = self.storage.post_process(self.found_files, dry_run=self.dry_run)
-        self.save_manifest_to_cache()
 
         for original_path, processed_path, processed in processor:
             if isinstance(processed, Exception):
@@ -226,3 +228,5 @@ class Command(collectstatic.Command):
                 self.post_processed_files.append(original_path)
             else:
                 self.log("Skipped post-processing '%s'" % original_path)
+
+        self.save_manifest_to_cache()

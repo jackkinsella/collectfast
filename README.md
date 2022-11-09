@@ -47,6 +47,10 @@ Make sure you have this in your settings file and add `'collectfast'` to your
 ```python
 STATICFILES_STORAGE = "storages.backends.s3boto3.S3Boto3Storage"
 COLLECTFAST_STRATEGY = "collectfast.strategies.boto3.Boto3Strategy"
+
+# Optional, if using S3ManifestStrategy. This should be the location
+# of your manifest file (e.g.
+# COLLECTFAST_MANIFEST_LOCATION = ...
 INSTALLED_APPS = (
     # ...
     "collectfast",
